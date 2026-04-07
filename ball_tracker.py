@@ -536,7 +536,7 @@ def run_calibration(video_path=None, image_path=None, camera_index=0):
                     if new_frame is None:
                         break
                     if new_frame.ndim == 3 and new_frame.shape[2] == 4:
-                        new_frame = cv2.cvtColor(new_frame, cv2.COLOR_RGBA2BGR)
+                        new_frame = cv2.cvtColor(new_frame, cv2.COLOR_RGBA2RGB)
                     frame = new_frame
                 else:
                     ret, new_frame = cap.read()
