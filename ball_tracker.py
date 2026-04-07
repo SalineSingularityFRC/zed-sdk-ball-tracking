@@ -489,7 +489,7 @@ def run_calibration(video_path=None, image_path=None, camera_index=0):
                         frame = mat.get_data()
                         # Convert RGBA (ZED) to BGR for OpenCV if needed
                         if frame is not None and frame.ndim == 3 and frame.shape[2] == 4:
-                            frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+                            frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2RGB)
                         use_zed = True
                         cap = cam
                     else:
@@ -742,7 +742,7 @@ def run_tracker(video_path=None, camera_index=0, start_from=0.0, no_roi=False):
         if first_frame is None:
             print("Error: Could not read first frame from ZED"); cap.close(); return
         if first_frame.ndim == 3 and first_frame.shape[2] == 4:
-            first_frame = cv2.cvtColor(first_frame, cv2.COLOR_RGBA2BGR)
+            first_frame = cv2.cvtColor(first_frame, cv2.COLOR_RGBA2RGB)
     else:
         ret, first_frame = cap.read()
         if not ret:
@@ -782,7 +782,7 @@ def run_tracker(video_path=None, camera_index=0, start_from=0.0, no_roi=False):
                 if frame is None:
                     print("End of ZED stream"); break
                 if frame.ndim == 3 and frame.shape[2] == 4:
-                    frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+                    frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2RGB)
             else:
                 ret, frame = cap.read()
                 if not ret:
