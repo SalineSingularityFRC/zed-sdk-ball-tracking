@@ -4,6 +4,14 @@ from pathlib import Path
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 
+# Try to import ZED SDK (pyzed). This is optional; fall back to OpenCV camera if unavailable.
+try:
+    import pyzed.sl as sl
+    _has_zed = True
+except Exception:
+    sl = None
+    _has_zed = False
+
 
 class BallisticTrajectory:
     """
@@ -463,13 +471,48 @@ def run_calibration(video_path=None, image_path=None, camera_index=0):
         if not cap.isOpened():
             print(f"Error: Could not open video '{video_path}'"); return
     else:
-        cap = cv2.VideoCapture(camera_index)
-        if not cap.isOpened():
-            print(f"Error: Could not open camera {camera_index}"); return
-        import time; time.sleep(0.5)
-        ret, frame = cap.read()
-        if not ret:
-            print("Error: Camera opened but cannot read frames"); cap.release(); return
+        # Prefer ZED camera when available
+        use_zed = False
+        cap = None
+        if _has_zed:
+            try:
+                cam = sl.Camera()
+                init = sl.InitParameters()
+                # Use default init params; user can tune if needed
+                status = cam.open(init)
+                if status == sl.ERROR_CODE.SUCCESS:
+                    runtime = sl.RuntimeParameters()
+                    mat = sl.Mat()
+                    # small warm-up and single frame grab
+                    if cam.grab(runtime) == sl.ERROR_CODE.SUCCESS:
+                        cam.retrieve_image(mat, sl.VIEW.LEFT)
+                        frame = mat.get_data()
+                        # Convert RGBA (ZED) to BGR for OpenCV if needed
+                        if frame is not None and frame.ndim == 3 and frame.shape[2] == 4:
+                            frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+                        use_zed = True
+                        cap = cam
+                    else:
+                        cam.close()
+                        cap = None
+                else:
+                    # failed to open ZED, fall back to cv2
+                    cap = None
+            except Exception:
+                cap = None
+
+        if cap is None:
+            cap = cv2.VideoCapture(camera_index)
+            if not cap.isOpened():
+                print(f"Error: Could not open camera {camera_index}"); return
+            import time; time.sleep(0.5)
+            ret, frame = cap.read()
+            if not ret:
+                print("Error: Camera opened but cannot read frames");
+                # cleanup
+                if hasattr(cap, 'release'):
+                    cap.release()
+                return
 
     window_name = 'HSV Calibration Tool'
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
@@ -483,13 +526,26 @@ def run_calibration(video_path=None, image_path=None, camera_index=0):
     try:
         while True:
             if cap is not None:
-                ret, new_frame = cap.read()
-                if not ret:
-                    if video_path:
-                        cap.set(cv2.CAP_PROP_POS_FRAMES, 0); continue
-                    else:
+                # If using ZED camera instance
+                if _has_zed and isinstance(cap, sl.Camera):
+                    if cap.grab(runtime) != sl.ERROR_CODE.SUCCESS:
                         break
-                frame = new_frame
+                    mat = sl.Mat()
+                    cap.retrieve_image(mat, sl.VIEW.LEFT)
+                    new_frame = mat.get_data()
+                    if new_frame is None:
+                        break
+                    if new_frame.ndim == 3 and new_frame.shape[2] == 4:
+                        new_frame = cv2.cvtColor(new_frame, cv2.COLOR_RGBA2BGR)
+                    frame = new_frame
+                else:
+                    ret, new_frame = cap.read()
+                    if not ret:
+                        if video_path:
+                            cap.set(cv2.CAP_PROP_POS_FRAMES, 0); continue
+                        else:
+                            break
+                    frame = new_frame
 
             vals = {n: cv2.getTrackbarPos(n, window_name)
                     for n in ['H Min', 'H Max', 'S Min', 'S Max', 'V Min', 'V Max']}
@@ -523,8 +579,15 @@ def run_calibration(video_path=None, image_path=None, camera_index=0):
                              ('S Max', 255), ('V Min', 0), ('V Max', 255)]:
                     cv2.setTrackbarPos(n, window_name, v)
     finally:
+        # Cleanup capture
         if cap is not None:
-            cap.release()
+            try:
+                if _has_zed and isinstance(cap, sl.Camera):
+                    cap.close()
+                elif hasattr(cap, 'release'):
+                    cap.release()
+            except Exception:
+                pass
         cv2.destroyAllWindows()
 
 
@@ -611,18 +674,55 @@ def run_tracker(video_path=None, camera_index=0, start_from=0.0, no_roi=False):
     else:
         print("Using default HSV values (run with --calibrate to tune)")
 
+    use_zed = False
+    cap = None
     if video_path:
         if not Path(video_path).exists():
             print(f"Error: Video file '{video_path}' not found"); return
         cap = cv2.VideoCapture(video_path)
     else:
-        cap = cv2.VideoCapture(camera_index)
+        # Prefer ZED camera when available
+        if _has_zed:
+            try:
+                cam = sl.Camera()
+                init = sl.InitParameters()
+                status = cam.open(init)
+                if status == sl.ERROR_CODE.SUCCESS:
+                    runtime = sl.RuntimeParameters()
+                    cap = cam
+                    use_zed = True
+                else:
+                    cam.close()
+                    cap = None
+            except Exception:
+                cap = None
 
-    if not cap.isOpened():
+        if cap is None:
+            cap = cv2.VideoCapture(camera_index)
+
+    # Validate capture
+    try:
+        opened = cap.isOpened() if not (use_zed and isinstance(cap, sl.Camera)) else True
+    except Exception:
+        opened = False
+    if not opened:
         print("Error: Could not open video source"); return
 
-    fps = cap.get(cv2.CAP_PROP_FPS)
-    if fps <= 0:
+    # Determine fps
+    fps = None
+    if use_zed and isinstance(cap, sl.Camera):
+        try:
+            info = cap.get_camera_information()
+            fps = getattr(info.camera_configuration, 'fps', None)
+        except Exception:
+            fps = None
+    else:
+        try:
+            fps = cap.get(cv2.CAP_PROP_FPS)
+        except Exception:
+            fps = None
+
+    if not fps or fps <= 0:
         fps = 30.0
     kwargs['fps'] = fps
 
@@ -632,9 +732,24 @@ def run_tracker(video_path=None, camera_index=0, start_from=0.0, no_roi=False):
         print(f"Seeked to {actual:.1f}s (requested {start_from:.1f}s)")
 
     # --- ROI selection from first frame ---
-    ret, first_frame = cap.read()
-    if not ret:
-        print("Error: Could not read first frame"); cap.release(); return
+    # Read first frame (handle ZED differently)
+    if use_zed and isinstance(cap, sl.Camera):
+        mat = sl.Mat()
+        if cap.grab(runtime) != sl.ERROR_CODE.SUCCESS:
+            print("Error: Could not read first frame from ZED"); cap.close(); return
+        cap.retrieve_image(mat, sl.VIEW.LEFT)
+        first_frame = mat.get_data()
+        if first_frame is None:
+            print("Error: Could not read first frame from ZED"); cap.close(); return
+        if first_frame.ndim == 3 and first_frame.shape[2] == 4:
+            first_frame = cv2.cvtColor(first_frame, cv2.COLOR_RGBA2BGR)
+    else:
+        ret, first_frame = cap.read()
+        if not ret:
+            print("Error: Could not read first frame");
+            if hasattr(cap, 'release'):
+                cap.release()
+            return
 
     if not no_roi:
         print("Select ROI and press ENTER/SPACE. Press 'c' to cancel (no ROI).")
@@ -657,9 +772,21 @@ def run_tracker(video_path=None, camera_index=0, start_from=0.0, no_roi=False):
     print("Press 'q' to quit")
     try:
         while True:
-            ret, frame = cap.read()
-            if not ret:
-                print("End of video"); break
+            # Read frame depending on capture type
+            if use_zed and isinstance(cap, sl.Camera):
+                mat = sl.Mat()
+                if cap.grab(runtime) != sl.ERROR_CODE.SUCCESS:
+                    print("End of ZED stream"); break
+                cap.retrieve_image(mat, sl.VIEW.LEFT)
+                frame = mat.get_data()
+                if frame is None:
+                    print("End of ZED stream"); break
+                if frame.ndim == 3 and frame.shape[2] == 4:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+            else:
+                ret, frame = cap.read()
+                if not ret:
+                    print("End of video"); break
 
             mask = tracker.segment(frame)
             vis = tracker.track(frame, mask)
@@ -669,7 +796,15 @@ def run_tracker(video_path=None, camera_index=0, start_from=0.0, no_roi=False):
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 break
     finally:
-        cap.release()
+        # Cleanup capture
+        if cap is not None:
+            try:
+                if use_zed and isinstance(cap, sl.Camera):
+                    cap.close()
+                elif hasattr(cap, 'release'):
+                    cap.release()
+            except Exception:
+                pass
         cv2.destroyAllWindows()
 
         # Flush any still-active tracks into ROI stats
