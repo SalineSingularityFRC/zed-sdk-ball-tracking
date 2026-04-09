@@ -15,103 +15,116 @@ from tracker import BallTracker
 from calibration import run_calibration, load_hsv_config
 
 
-def _show_roi_summary(background, tracker):
-    """Show a final image with all ROI trajectories overlaid. Press any key to close."""
-    vis = background.copy()
-    # Dim the background so trajectories stand out
-    vis = (vis * 0.4).astype(np.uint8)
-
-    # Draw ROI
-    rx, ry, rw, rh = tracker.roi
-    cv2.rectangle(vis, (rx, ry), (rx + rw, ry + rh), (0, 255, 255), 2)
-
+def _show_roi_summary(tracker):
+    """
+    Displays the final summary with tracks, and optionally plots 3D trajectories
+    if a ZED camera and depth data were used.
+    """
+    h_max = max((s['image_shape'][0] for s in tracker.roi_stats), default=480)
+    w_max = max((s['image_shape'][1] for s in tracker.roi_stats), default=640)
+    
+    summary = np.zeros((h_max, w_max, 3), dtype=np.uint8)
+    has_3d = False
+    
     for s in tracker.roi_stats:
-        color = s['color']
-        positions = s['positions']
-        coeffs_x = s['coeffs_x']
-        coeffs_y = s['coeffs_y']
-        frames = s['frames']
-
-        # Draw raw detection points
-        for px, py in positions:
-            cv2.circle(vis, (int(px), int(py)), 4, color, -1, cv2.LINE_AA)
-
-        # Draw fitted curve
-        if coeffs_x is not None and coeffs_y is not None and len(frames) >= 3:
-            f0, f1 = frames[0], frames[-1]
-            curve_pts = []
-            for fi in np.linspace(f0, f1, num=max(50, (f1 - f0) * 3)):
-                x = np.polyval(coeffs_x, fi)
-                y = np.polyval(coeffs_y, fi)
-                curve_pts.append((int(x), int(y)))
-            if len(curve_pts) > 1:
-                cv2.polylines(vis, [np.array(curve_pts, np.int32)], False,
-                              color, 2, cv2.LINE_AA)
-
-        # Label at the midpoint of the trajectory
-        mid = positions[len(positions) // 2]
-        label = f"#{s['id']} {s['airtime']:.2f}s v={s['speed']:.0f}"
-        cv2.putText(vis, label, (int(mid[0]) + 8, int(mid[1]) - 8),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1, cv2.LINE_AA)
-
-    # Summary text at top
-    cv2.putText(vis, f"ROI Summary: {len(tracker.roi_stats)} trajectories",
+        b, g, r = s['color']
+        c = (int(b), int(g), int(r))
+        pts = s['positions']
+        for p in pts:
+            cv2.circle(summary, (int(p[0]), int(p[1])), 4, c, -1)
+            
+        pos3d = s.get('positions_3d')
+        if pos3d and any(p is not None for p in pos3d):
+            has_3d = True
+            
+        # Optional: Print track info
+        #print(f"Track ID #{s['id']} - Airtime: {s['airtime']:.2f}s, Speed: {s['speed']:.1f}px/frame")
+    
+    cv2.putText(summary, f"ROI Summary: {len(tracker.roi_stats)} trajectories",
                 (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
     airtimes = [s['airtime'] for s in tracker.roi_stats]
     speeds = [s['speed'] for s in tracker.roi_stats]
-    cv2.putText(vis, f"Airtime avg={np.mean(airtimes):.2f}s  Speed avg={np.mean(speeds):.0f}",
+    cv2.putText(summary, f"Airtime avg={np.mean(airtimes):.2f}s  Speed avg={np.mean(speeds):.0f}",
                 (10, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
 
-    cv2.imshow('ROI Summary', vis)
-    cv2.waitKey(1)  # Force GUI loop to draw ROI summary
-
-    has_3d = any(s.get('positions_3d') for s in tracker.roi_stats)
+    cv2.imshow('ROI Summary', summary)
     
-    if has_3d and _has_plt:
-        print("\nOpening 3D Matplotlib trajectory summary. Close the plot window to finish.")
+    _has_plt = False
+    try:
+        import matplotlib.pyplot as plt
+        _has_plt = True
+    except ImportError:
+        pass
+    
+    plotted_any = False
+    
+    if _has_plt:
+        if has_3d:
+            print("\nOpening 3D Matplotlib trajectory summary. Close the plot window to finish.")
+        else:
+            print("\nNo ZED depth data found. Showing semi-3D plot (X, Time, Y) instead.")
+            
+        plt.ion() # Enable interactive mode
         fig = plt.figure("3D Trajectories")
         ax = fig.add_subplot(111, projection='3d')
         
-        plotted_any = False
         for s in tracker.roi_stats:
             pos3d = s.get('positions_3d')
-            if not pos3d: continue
+            pos2d = s.get('positions')
+            frames = s.get('frames')
+            if not pos2d: continue
             
-            valid = [p for p in pos3d if p is not None]
-            if not valid: continue
-            
-            X = [p[0] for p in valid]
-            Y = [p[1] for p in valid]
-            Z = [p[2] for p in valid]
-            
-            # Format BGR to RGB hex
             b, g, r = s['color']
             color_hex = '#%02x%02x%02x' % (r, g, b)
             
+            X, Y, Z = [], [], []
+            if has_3d and pos3d:
+                valid = [(p[0], p[1], p[2]) for p in pos3d if p is not None]
+                if valid:
+                    X = [p[0] for p in valid]
+                    Y = [p[1] for p in valid]
+                    Z = [p[2] for p in valid]
+            
+            if not X: # Fallback to 2D (X, Time, Y) if no 3D points in this track
+                X = [p[0] for p in pos2d]
+                Z = frames  # Use frame time as Z depth
+                Y = [p[1] for p in pos2d]
+
+            if not X: continue
+
             ax.scatter(X, Z, Y, color=color_hex, label=f"ID #{s['id']}")
             plotted_any = True
             
-            # Plot 3D polynomial curve
-            cX = s.get('coeffs_X')
-            cY = s.get('coeffs_Y')
-            cZ = s.get('coeffs_Z')
-            frames = s['frames']
+            # Plot polynomial curve
+            cX, cY, cZ = s.get('coeffs_X'), s.get('coeffs_Y'), s.get('coeffs_Z')
+            cx, cy = s.get('coeffs_x'), s.get('coeffs_y')
             
-            if cX is not None and cY is not None and cZ is not None and len(frames) >= 2:
-                f0, f1 = frames[0], frames[-1]
-                t_vals = np.linspace(f0, f1, 50)
+            if has_3d and cX is not None and cY is not None and cZ is not None and len(frames) >= 2:
+                t_vals = np.linspace(frames[0], frames[-1], 50)
                 curve_X = np.polyval(cX, t_vals)
                 curve_Y = np.polyval(cY, t_vals)
                 curve_Z = np.polyval(cZ, t_vals)
                 ax.plot(curve_X, curve_Z, curve_Y, color=color_hex)
+            elif not has_3d and cx is not None and cy is not None and len(frames) >= 2:
+                # 2D fallback poly
+                t_vals = np.linspace(frames[0], frames[-1], 50)
+                curve_X = np.polyval(cx, t_vals)
+                curve_Y = np.polyval(cy, t_vals)
+                curve_Z = t_vals
+                ax.plot(curve_X, curve_Z, curve_Y, color=color_hex)
                 
         if plotted_any:
-            ax.set_xlabel('X (m) [Right]')
-            ax.set_ylabel('Z (m) [Forward]')
-            ax.set_zlabel('Y (m) [Down]')
-            ax.invert_zaxis() # Typically Y goes down in camera coords, invert visually
+            if has_3d:
+                ax.set_xlabel('X (m) [Right]')
+                ax.set_ylabel('Z (m) [Forward]')
+                ax.set_zlabel('Y (m) [Down]')
+            else:
+                ax.set_xlabel('X (px)')
+                ax.set_ylabel('Frame (Time)')
+                ax.set_zlabel('Y (px)')
+                
+            ax.invert_zaxis() # Invert visually so Y drops down
             
-            # Matplotlib 3.3.0+
             try:
                 ax.set_box_aspect((1, 1, 1))
             except AttributeError:
@@ -120,19 +133,25 @@ def _show_roi_summary(background, tracker):
             plt.legend()
             plt.show(block=False)  # Show without blocking so OpenCV remains responsive
 
-    if has_3d and not _has_plt:
-        print("\n3D points found but 'matplotlib' is missing! Run 'pip install matplotlib' to see 3D graphs.")
+    if not _has_plt:
+        print("\n'matplotlib' is missing! Run 'pip install matplotlib' to see graph visualizations.")
         
     print("\nShowing ROI summary — press any key in the OpenCV window to close.")
     
-    if has_3d and _has_plt and plotted_any:
+    if _has_plt and plotted_any:
         # Event loop to keep both Matplotlib and OpenCV windows responsive simultaneously
         while True:
-            if cv2.waitKey(50) != -1:
+            # OpenCV waitKey waits briefly for a key press
+            key = cv2.waitKey(50)
+            if key != -1:
                 break
+            # Process Matplotlib events so the window stays active
             try:
                 if plt.fignum_exists(fig.number):
                     fig.canvas.flush_events()
+                else:
+                    # if they close the matplotlib window, exit
+                    break
             except Exception:
                 pass
     else:
