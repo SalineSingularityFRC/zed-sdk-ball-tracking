@@ -1,5 +1,65 @@
 import numpy as np
 
+def robust_polyfit(x, y, deg, max_trials=50, threshold=None):
+    """
+    RANSAC-style robust polynomial fitting to reject outliers (e.g. spurious tracks).
+    Falls back to regular least-squares polyfit if points are too few.
+    """
+    n = len(x)
+    if n <= deg + 2:
+        return np.polyfit(x, y, deg)
+    
+    if threshold is None:
+        # Define inlier threshold based on standard deviation or a minimum base value
+        spread = np.std(y)
+        threshold = max(spread * 0.5, 1e-4)
+    
+    best_inliers = 0
+    best_coeffs = None
+    best_error = float('inf')
+    
+    min_samples = deg + 1
+    
+    for _ in range(max_trials):
+        # randomly select minimum required points
+        indices = np.random.choice(n, min_samples, replace=False)
+        sample_x = x[indices]
+        sample_y = y[indices]
+        
+        try:
+            coeffs = np.polyfit(sample_x, sample_y, deg)
+        except np.linalg.LinAlgError:
+            continue
+            
+        # compute error for all points
+        pred_y = np.polyval(coeffs, x)
+        errors = np.abs(y - pred_y)
+        
+        # count inliers
+        inlier_mask = errors < threshold
+        num_inliers = np.sum(inlier_mask)
+        
+        if num_inliers > best_inliers:
+            best_inliers = num_inliers
+            # Refit on all discovered inliers
+            best_coeffs = np.polyfit(x[inlier_mask], y[inlier_mask], deg)
+            pred_y_inliers = np.polyval(best_coeffs, x[inlier_mask])
+            best_error = np.mean(np.abs(y[inlier_mask] - pred_y_inliers))
+        elif num_inliers == best_inliers and best_inliers > 0:
+            # Re-evaluate tiebreakers by lowest error
+            coeffs_refit = np.polyfit(x[inlier_mask], y[inlier_mask], deg)
+            pred_y_inliers = np.polyval(coeffs_refit, x[inlier_mask])
+            err = np.mean(np.abs(y[inlier_mask] - pred_y_inliers))
+            if err < best_error:
+                best_coeffs = coeffs_refit
+                best_error = err
+                
+    if best_coeffs is None:
+        return np.polyfit(x, y, deg)
+        
+    return best_coeffs
+
+
 class BallisticTrajectory:
     """
     Incrementally-fitted ballistic trajectory.
@@ -41,11 +101,11 @@ class BallisticTrajectory:
 
         # x: linear (deg 1), but use deg 0 if only 2 points and they're close in time
         deg_x = min(1, n - 1)
-        self.coeffs_x = np.polyfit(t, pts[:, 0], deg=deg_x)
+        self.coeffs_x = robust_polyfit(t, pts[:, 0], deg=deg_x)
 
         # y: quadratic for gravity, but degrade gracefully
         deg_y = min(2, n - 1)
-        self.coeffs_y = np.polyfit(t, pts[:, 1], deg=deg_y)
+        self.coeffs_y = robust_polyfit(t, pts[:, 1], deg=deg_y)
 
         # Compute fit error
         pred_x = np.polyval(self.coeffs_x, t)
@@ -65,9 +125,9 @@ class BallisticTrajectory:
             deg_xz = min(1, n3d - 1)
             deg_y = min(2, n3d - 1)
 
-            self.coeffs_X = np.polyfit(t3, X, deg=deg_xz)
-            self.coeffs_Y = np.polyfit(t3, Y, deg=deg_y)
-            self.coeffs_Z = np.polyfit(t3, Z, deg=deg_xz)
+            self.coeffs_X = robust_polyfit(t3, X, deg=deg_xz)
+            self.coeffs_Y = robust_polyfit(t3, Y, deg=deg_y)
+            self.coeffs_Z = robust_polyfit(t3, Z, deg=deg_xz)
         else:
             self.coeffs_X = None
             self.coeffs_Y = None
