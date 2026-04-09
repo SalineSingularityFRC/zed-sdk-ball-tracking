@@ -118,11 +118,24 @@ def _show_roi_summary(background, tracker):
                 pass
 
             plt.legend()
-            plt.show() # Blocks until user closes plot
+            plt.show(block=False)  # Show without blocking so OpenCV remains responsive
+
+    if has_3d and not _has_plt:
+        print("\n3D points found but 'matplotlib' is missing! Run 'pip install matplotlib' to see 3D graphs.")
+        
+    print("\nShowing ROI summary — press any key in the OpenCV window to close.")
+    
+    if has_3d and _has_plt and plotted_any:
+        # Event loop to keep both Matplotlib and OpenCV windows responsive simultaneously
+        while True:
+            if cv2.waitKey(50) != -1:
+                break
+            try:
+                if plt.fignum_exists(fig.number):
+                    fig.canvas.flush_events()
+            except Exception:
+                pass
     else:
-        if has_3d and not _has_plt:
-            print("\n3D points found but 'matplotlib' is missing! Run 'pip install matplotlib' to see 3D graphs.")
-        print("\nShowing ROI summary — press any key to close.")
         cv2.waitKey(0)
 
     cv2.destroyWindow('ROI Summary')
