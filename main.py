@@ -4,6 +4,12 @@ from pathlib import Path
 import numpy as np
 import cv2
 
+try:
+    import matplotlib.pyplot as plt
+    _has_plt = True
+except ImportError:
+    _has_plt = False
+
 from zed_utils import sl, _has_zed
 from tracker import BallTracker
 from calibration import run_calibration, load_hsv_config
@@ -57,8 +63,68 @@ def _show_roi_summary(background, tracker):
                 (10, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
 
     cv2.imshow('ROI Summary', vis)
-    print("\nShowing ROI summary — press any key to close.")
-    cv2.waitKey(0)
+    cv2.waitKey(1)  # Force GUI loop to draw ROI summary
+
+    has_3d = any(s.get('positions_3d') for s in tracker.roi_stats)
+    
+    if has_3d and _has_plt:
+        print("\nOpening 3D Matplotlib trajectory summary. Close the plot window to finish.")
+        fig = plt.figure("3D Trajectories")
+        ax = fig.add_subplot(111, projection='3d')
+        
+        plotted_any = False
+        for s in tracker.roi_stats:
+            pos3d = s.get('positions_3d')
+            if not pos3d: continue
+            
+            valid = [p for p in pos3d if p is not None]
+            if not valid: continue
+            
+            X = [p[0] for p in valid]
+            Y = [p[1] for p in valid]
+            Z = [p[2] for p in valid]
+            
+            # Format BGR to RGB hex
+            b, g, r = s['color']
+            color_hex = '#%02x%02x%02x' % (r, g, b)
+            
+            ax.scatter(X, Z, Y, color=color_hex, label=f"ID #{s['id']}")
+            plotted_any = True
+            
+            # Plot 3D polynomial curve
+            cX = s.get('coeffs_X')
+            cY = s.get('coeffs_Y')
+            cZ = s.get('coeffs_Z')
+            frames = s['frames']
+            
+            if cX is not None and cY is not None and cZ is not None and len(frames) >= 2:
+                f0, f1 = frames[0], frames[-1]
+                t_vals = np.linspace(f0, f1, 50)
+                curve_X = np.polyval(cX, t_vals)
+                curve_Y = np.polyval(cY, t_vals)
+                curve_Z = np.polyval(cZ, t_vals)
+                ax.plot(curve_X, curve_Z, curve_Y, color=color_hex)
+                
+        if plotted_any:
+            ax.set_xlabel('X (m) [Right]')
+            ax.set_ylabel('Z (m) [Forward]')
+            ax.set_zlabel('Y (m) [Down]')
+            ax.invert_zaxis() # Typically Y goes down in camera coords, invert visually
+            
+            # Matplotlib 3.3.0+
+            try:
+                ax.set_box_aspect((1, 1, 1))
+            except AttributeError:
+                pass
+
+            plt.legend()
+            plt.show() # Blocks until user closes plot
+    else:
+        if has_3d and not _has_plt:
+            print("\n3D points found but 'matplotlib' is missing! Run 'pip install matplotlib' to see 3D graphs.")
+        print("\nShowing ROI summary — press any key to close.")
+        cv2.waitKey(0)
+
     cv2.destroyWindow('ROI Summary')
 
 

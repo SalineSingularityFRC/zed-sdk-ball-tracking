@@ -13,6 +13,9 @@ class BallisticTrajectory:
         self.frames = []     # list of frame indices
         self.coeffs_x = None
         self.coeffs_y = None
+        self.coeffs_X = None  # 3D X polynomial
+        self.coeffs_Y = None  # 3D Y polynomial
+        self.coeffs_Z = None  # 3D Z polynomial
         self.fit_error = 0.0
 
     def add(self, x, y, frame_idx, pos3d=None):
@@ -49,6 +52,26 @@ class BallisticTrajectory:
         pred_y = np.polyval(self.coeffs_y, t)
         errors = np.sqrt((pts[:, 0] - pred_x) ** 2 + (pts[:, 1] - pred_y) ** 2)
         self.fit_error = np.mean(errors)
+
+        # 3D fit
+        valid_3d = [(float(f), p[0], p[1], p[2]) for f, p in zip(self.frames, self.positions3d) if p is not None]
+        n3d = len(valid_3d)
+        if n3d >= 2:
+            t3 = np.array([v[0] for v in valid_3d])
+            X = np.array([v[1] for v in valid_3d])
+            Y = np.array([v[2] for v in valid_3d])
+            Z = np.array([v[3] for v in valid_3d])
+
+            deg_xz = min(1, n3d - 1)
+            deg_y = min(2, n3d - 1)
+
+            self.coeffs_X = np.polyfit(t3, X, deg=deg_xz)
+            self.coeffs_Y = np.polyfit(t3, Y, deg=deg_y)
+            self.coeffs_Z = np.polyfit(t3, Z, deg=deg_xz)
+        else:
+            self.coeffs_X = None
+            self.coeffs_Y = None
+            self.coeffs_Z = None
 
     def predict(self, frame_idx):
         """Predict position at frame_idx."""

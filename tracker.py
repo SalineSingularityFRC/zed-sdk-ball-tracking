@@ -215,6 +215,9 @@ class BallTracker:
             'frames': list(traj.frames),
             'coeffs_x': traj.coeffs_x.copy() if traj.coeffs_x is not None else None,
             'coeffs_y': traj.coeffs_y.copy() if traj.coeffs_y is not None else None,
+            'coeffs_X': traj.coeffs_X.copy() if getattr(traj, 'coeffs_X', None) is not None else None,
+            'coeffs_Y': traj.coeffs_Y.copy() if getattr(traj, 'coeffs_Y', None) is not None else None,
+            'coeffs_Z': traj.coeffs_Z.copy() if getattr(traj, 'coeffs_Z', None) is not None else None,
             'color': track.color,
         })
 
