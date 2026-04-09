@@ -182,6 +182,8 @@ def run_tracker(video_path=None, camera_index=0, start_from=0.0, no_roi=False):
             try:
                 cam = sl.Camera()
                 init = sl.InitParameters()
+                init.depth_mode = sl.DEPTH_MODE.ULTRA # Use ULTRA depth mode
+                init.coordinate_units = sl.UNIT.MILLIMETER # Use millimeter units
                 status = cam.open(init)
                 if status == sl.ERROR_CODE.SUCCESS:
                     runtime = sl.RuntimeParameters()
@@ -263,9 +265,9 @@ def run_tracker(video_path=None, camera_index=0, start_from=0.0, no_roi=False):
         try:
             tracker.enable_zed(cap, runtime)
             # attempt to retrieve an initial depth map
-            if tracker._zed_depth_mat is not None:
+            if getattr(tracker, '_zed_pc_mat', None) is not None:
                 try:
-                    cap.retrieve_measure(tracker._zed_depth_mat, sl.MEASURE.DEPTH)
+                    cap.retrieve_measure(tracker._zed_pc_mat, sl.MEASURE.XYZRGBA)
                 except Exception:
                     pass
         except Exception:
@@ -291,10 +293,10 @@ def run_tracker(video_path=None, camera_index=0, start_from=0.0, no_roi=False):
                     print("End of ZED stream"); break
                 if frame.ndim == 3 and frame.shape[2] == 4:
                     frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
-                # update depth map for this frame so tracker can query 3D points
+                # update point cloud for this frame so tracker can query 3D points
                 try:
-                    if tracker._zed_depth_mat is not None:
-                        cap.retrieve_measure(tracker._zed_depth_mat, sl.MEASURE.DEPTH)
+                    if getattr(tracker, '_zed_pc_mat', None) is not None:
+                        cap.retrieve_measure(tracker._zed_pc_mat, sl.MEASURE.XYZRGBA)
                 except Exception:
                     # non-fatal; continue without depth
                     pass

@@ -37,8 +37,7 @@ class BallTracker:
         # ZED-related state (initialized when tracker is used with a ZED Camera)
         self.zed_cam = None
         self._zed_runtime = None
-        self._zed_depth_mat = None
-        self.zed_intrinsics = None  # dict with fx,fy,cx,cy if available
+        self._zed_pc_mat = None
 
     def segment(self, frame):
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -122,7 +121,7 @@ class BallTracker:
                     # Try to get 3D point if ZED depth is available
                     pos3d = None
                     try:
-                        if self._zed_depth_mat is not None:
+                        if getattr(self, '_zed_pc_mat', None) is not None:
                             pos3d = self._get_point3d(dx, dy)
                     except Exception:
                         pos3d = None
@@ -141,7 +140,7 @@ class BallTracker:
                 # when creating a new track, try to include 3D point
                 pos3d = None
                 try:
-                    if self._zed_depth_mat is not None:
+                    if getattr(self, '_zed_pc_mat', None) is not None:
                         pos3d = self._get_point3d(dx, dy)
                 except Exception:
                     pos3d = None
@@ -259,52 +258,46 @@ class BallTracker:
         try:
             self.zed_cam = cam
             self._zed_runtime = runtime
-            self._zed_depth_mat = sl.Mat()
-            # Try to read intrinsics
-            info = cam.get_camera_information()
-            intr = None
-            try:
-                cam_conf = getattr(info, 'camera_configuration', None)
-                calib = getattr(cam_conf, 'calibration_parameters', None)
-                left = getattr(calib, 'left_cam', None)
-                fx = getattr(left, 'fx', None)
-                fy = getattr(left, 'fy', None)
-                cx = getattr(left, 'cx', None)
-                cy = getattr(left, 'cy', None)
-                if fx is not None and fy is not None and cx is not None and cy is not None:
-                    intr = dict(fx=float(fx), fy=float(fy), cx=float(cx), cy=float(cy))
-            except Exception:
-                intr = None
-            self.zed_intrinsics = intr
+            self._zed_pc_mat = sl.Mat()
+            # Intrinsics are mostly unnecessary when directly querying pointcloud
         except Exception:
             self.zed_cam = None
             self._zed_runtime = None
-            self._zed_depth_mat = None
-            self.zed_intrinsics = None
+            self._zed_pc_mat = None
 
     def _get_point3d(self, u, v):
-        """Return (X,Y,Z) in meters in camera coordinates for pixel (u,v) using the latest depth mat.
+        """Return (X,Y,Z) in meters in camera coordinates for pixel (u,v) using the latest point cloud.
 
-        Returns None if no valid depth or intrinsics available.
+        Returns None if no valid depth available.
         """
-        if not _has_zed or self.zed_cam is None or self._zed_depth_mat is None:
+        if not _has_zed or self.zed_cam is None or getattr(self, '_zed_pc_mat', None) is None:
             return None
         try:
-            # read depth at pixel (u,v). depth is in meters
-            z = self._zed_depth_mat.get_value(int(round(u)), int(round(v)))
-            if z is None:
+            # read point cloud at pixel (u,v)
+            res = self._zed_pc_mat.get_value(int(round(u)), int(round(v)))
+            if isinstance(res, tuple) and len(res) == 2:
+                err, point3D = res
+            else:
+                err = sl.ERROR_CODE.SUCCESS
+                point3D = res
+                
+            if err != sl.ERROR_CODE.SUCCESS or point3D is None:
                 return None
-            z = float(z)
-            if np.isnan(z) or z <= 0:
+                
+            x, y, z = point3D[0], point3D[1], point3D[2]
+            
+            import math
+            distance = math.sqrt(x*x + y*y + z*z)
+            if np.isnan(distance) or np.isinf(distance) or distance <= 0:
                 return None
-            intr = self.zed_intrinsics
-            if intr is None:
-                return None
-            fx = intr['fx']; fy = intr['fy']; cx = intr['cx']; cy = intr['cy']
-            X = (u - cx) * z / fx
-            Y = (v - cy) * z / fy
-            Z = z
-            return (float(X), float(Y), float(Z))
+                
+            # Point cloud returns values in MILLIMETERS since we configured the init_params to MILLIMETER
+            # Convert values manually back to Meters so the rest of the app's physics scaling remains stable
+            X = float(x) / 1000.0
+            Y = float(y) / 1000.0
+            Z = float(z) / 1000.0
+            
+            return (X, Y, Z)
         except Exception:
             return None
 
