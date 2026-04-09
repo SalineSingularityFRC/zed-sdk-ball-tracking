@@ -15,13 +15,13 @@ from tracker import BallTracker
 from calibration import run_calibration, load_hsv_config
 
 
-def _show_roi_summary(tracker):
+def _show_roi_summary(first_frame, tracker):
     """
     Displays the final summary with tracks, and optionally plots 3D trajectories
     if a ZED camera and depth data were used.
     """
-    h_max = max((s['image_shape'][0] for s in tracker.roi_stats), default=480)
-    w_max = max((s['image_shape'][1] for s in tracker.roi_stats), default=640)
+    h_max = first_frame.shape[0] if first_frame is not None else 480
+    w_max = first_frame.shape[1] if first_frame is not None else 640
     
     summary = np.zeros((h_max, w_max, 3), dtype=np.uint8)
     has_3d = False
