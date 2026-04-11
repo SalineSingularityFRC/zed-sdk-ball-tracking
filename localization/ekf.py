@@ -5,11 +5,9 @@ from pupil_apriltags import Detector
 import numpy as np
 
 import gtsam
-from gtsam import (
-    ExtendedKalmanFilter,
-    Pose3, Rot3, Point3, Quaternion,
-    noiseModel
-)
+from gtsam import Pose3, Rot3, Point3, Quaternion
+
+from filterpy.kalman import ExtendedKalmanFilter as FpEKF
 
 
 def load_tag_world_poses(tags_path, allowed_tags=None):
@@ -39,6 +37,17 @@ def load_tag_world_poses(tags_path, allowed_tags=None):
 
 
 class ImuAprilTagEKF:
+    """Error-state EKF on SE(3).
+
+    Nominal pose `T_nom` is stored as a GTSAM Pose3. filterpy carries a 6D
+    body-frame error state `ξ` (held at zero except transiently during an
+    update) and the 6x6 covariance. GTSAM supplies the process model
+    (PreintegratedImuMeasurements) and the analytic SE(3) derivatives
+    (AdjointMap, Logmap, Expmap, between).
+
+    Error convention: T_true = T_nom ∘ Exp(ξ).
+    """
+
     def __init__(self, init_pose: Pose3, init_cov: np.ndarray,
                  camera_matrix, tag_size,
                  tags_path, allowed_tags=None,
@@ -59,65 +68,56 @@ class ImuAprilTagEKF:
         self.velocity = np.zeros(3)
         self.pim = gtsam.PreintegratedImuMeasurements(self.imu_params, self.bias)
 
-        # GTSAM EKF — operates on Pose3
-        # Use symbol 'x0' as the state key
-        self.key = gtsam.symbol('x', 0)
-        prior_noise = noiseModel.Gaussian.Covariance(init_cov)
-        self.ekf = ExtendedKalmanFilter(self.key, init_pose, prior_noise)
+        # Nominal pose lives outside the filter
+        self.T_nom = init_pose
 
-        # Noise models
-        self.predict_noise = noiseModel.Diagonal.Sigmas(
-            np.array([0.001, 0.001, 0.001, 0.01, 0.01, 0.01])  # rot, trans
-        )
-        self.tag_noise = noiseModel.Diagonal.Sigmas(
-            np.array([0.02, 0.02, 0.02, 0.05, 0.05, 0.05])  # rot, trans
-        )
+        # filterpy EKF carries the error state and covariance
+        self.ekf = FpEKF(dim_x=6, dim_z=6)
+        self.ekf.x = np.zeros(6)
+        self.ekf.P = np.asarray(init_cov, dtype=float)
+        self.ekf.F = np.eye(6)
+
+        # Process-noise floor (rot, trans), matches previous predict_noise sigmas
+        predict_sigmas = np.array([0.001, 0.001, 0.001, 0.01, 0.01, 0.01])
+        self.predict_extra_Q = np.diag(predict_sigmas ** 2)
+
+        # AprilTag measurement covariance (rot, trans)
+        tag_sigmas = np.array([0.02, 0.02, 0.02, 0.05, 0.05, 0.05])
+        self.R_tag = np.diag(tag_sigmas ** 2)
 
     def integrate_imu(self, accel: np.ndarray, gyro: np.ndarray, dt: float):
         """Call at IMU rate (~200 Hz). Accumulates into PIM."""
         self.pim.integrateMeasurement(accel, gyro, dt)
 
     def predict(self):
-        """
-        Call at camera rate to flush PIM into EKF predict step.
-        Uses a BetweenFactorPose3 as the process model factor.
-        """
-        # Get relative pose from preintegration
-        current_pose = self.ekf.mean()  # Pose3
-
-        nav_state_0 = gtsam.NavState(current_pose, self.velocity)
+        """Flush PIM into the error-state EKF predict step."""
+        nav_state_0 = gtsam.NavState(self.T_nom, self.velocity)
         nav_state_1 = self.pim.predict(nav_state_0, self.bias)
 
-        delta_pose = current_pose.between(nav_state_1.pose())
+        delta = self.T_nom.between(nav_state_1.pose())
         self.velocity = nav_state_1.velocity()
 
-        # Build a BetweenFactorPose3 as the EKF process factor
-        process_factor = gtsam.BetweenFactorPose3(
-            self.key, self.key,  # EKF handles the key increment internally
-            delta_pose,
-            self.predict_noise
-        )
+        # Body-frame error-state process Jacobian: F = Ad(delta^-1)
+        F = delta.inverse().AdjointMap()
 
-        self.ekf.predict(process_factor)
+        # Pose block of the preintegration covariance (NavState ordering: R, p, v)
+        Q_pim = np.asarray(self.pim.preintMeasCov())[0:6, 0:6]
 
-        # Reset PIM for next integration window
+        self.T_nom = self.T_nom.compose(delta)
+        self.ekf.F = F
+        self.ekf.Q = Q_pim + self.predict_extra_Q
+        self.ekf.predict()
+
         self.pim.resetIntegration()
 
-    # ------------------------------------------------------------------
-    # AprilTag: update when tags are visible
-    # ------------------------------------------------------------------
-
     def update(self, image: np.ndarray):
-        """
-        Call at camera rate when a new frame arrives.
-        Uses the tag map loaded from tags.json at construction time.
-        """
+        """Run AprilTag detections and fold each into the filter."""
         gray = image if image.ndim == 2 else image.mean(axis=2).astype(np.uint8)
         detections = self.detector.detect(
             gray,
             estimate_tag_pose=True,
-            camera_params=[self.K[0,0], self.K[1,1], self.K[0,2], self.K[1,2]],
-            tag_size=self.tag_size
+            camera_params=[self.K[0, 0], self.K[1, 1], self.K[0, 2], self.K[1, 2]],
+            tag_size=self.tag_size,
         )
 
         for det in detections:
@@ -125,32 +125,33 @@ class ImuAprilTagEKF:
             if tag_id not in self.tag_world_poses:
                 continue
 
-            # Pose of tag in camera frame from detector
+            # Tag pose in camera frame from detector
             R = Rot3(det.pose_R)
             t = Point3(det.pose_t.flatten())
             tag_in_cam = Pose3(R, t)
 
-            # Known tag pose in world
             tag_in_world = self.tag_world_poses[tag_id]
 
             # Expected camera pose in world: T_world_cam = T_world_tag * T_tag_cam
             expected_cam_pose = tag_in_world.compose(tag_in_cam.inverse())
 
-            # Build a PriorFactorPose3 as the measurement factor
-            measurement_factor = gtsam.PriorFactorPose3(
-                self.key,
-                expected_cam_pose,
-                self.tag_noise
+            # Innovation lives in the tangent space at the current nominal
+            innovation = gtsam.Pose3.Logmap(self.T_nom.between(expected_cam_pose))
+
+            # H = I, predicted measurement = 0 (body-frame error state)
+            self.ekf.R = self.R_tag
+            self.ekf.update(
+                z=innovation,
+                HJacobian=lambda x: np.eye(6),
+                Hx=lambda x: np.zeros(6),
             )
 
-            self.ekf.update(measurement_factor)
-
-    # ------------------------------------------------------------------
-    # Accessors
-    # ------------------------------------------------------------------
+            # Inject the correction into the nominal and reset the error state
+            self.T_nom = self.T_nom.compose(gtsam.Pose3.Expmap(self.ekf.x))
+            self.ekf.x = np.zeros(6)
 
     def pose(self) -> Pose3:
-        return self.ekf.mean()
+        return self.T_nom
 
     def covariance(self) -> np.ndarray:
-        return self.ekf.covariance()
+        return self.ekf.P
