@@ -93,6 +93,42 @@ def make_camera_actor() -> vtk.vtkAssembly:
     return assembly
 
 
+def make_field_actor(mesh_path: Path) -> vtk.vtkActor:
+    suffix = mesh_path.suffix.lower()
+    if suffix == ".obj":
+        reader = vtk.vtkOBJReader()
+    elif suffix == ".stl":
+        reader = vtk.vtkSTLReader()
+    elif suffix == ".ply":
+        reader = vtk.vtkPLYReader()
+    else:
+        raise ValueError(f"Unsupported field mesh format: {suffix}")
+    reader.SetFileName(str(mesh_path))
+    reader.Update()
+
+    normals = vtk.vtkPolyDataNormals()
+    normals.SetInputConnection(reader.GetOutputPort())
+    normals.SetFeatureAngle(45.0)
+    normals.SetSplitting(False)
+    normals.ConsistencyOn()
+    normals.AutoOrientNormalsOn()
+
+    mapper = vtk.vtkPolyDataMapper()
+    mapper.SetInputConnection(normals.GetOutputPort())
+
+    actor = vtk.vtkActor()
+    actor.SetMapper(mapper)
+    prop = actor.GetProperty()
+    prop.SetColor(0.78, 0.80, 0.84)
+    prop.SetOpacity(0.35)
+    prop.SetEdgeVisibility(True)
+    prop.SetEdgeColor(0.10, 0.10, 0.12)
+    prop.SetLineWidth(1)
+    prop.SetAmbient(0.25)
+    prop.SetDiffuse(0.65)
+    return actor
+
+
 def make_ground_grid(half_extent: float, step: float) -> vtk.vtkActor:
     pts = vtk.vtkPoints()
     lines = vtk.vtkCellArray()
@@ -125,13 +161,20 @@ def make_ground_grid(half_extent: float, step: float) -> vtk.vtkActor:
 
 
 class LocalizerVisualizer:
-    def __init__(self, localizer: CameraLocalizer, tag_world_poses: dict, tag_size: float):
+    def __init__(self, localizer: CameraLocalizer, tag_world_poses: dict, tag_size: float,
+                 field_path: Path | None = None):
         self.localizer = localizer
 
         self.renderer = vtk.vtkRenderer()
         self.renderer.SetBackground(0.08, 0.08, 0.12)
 
-        self.renderer.AddActor(make_ground_grid(half_extent=10.0, step=1.0))
+        self.renderer.AddActor(make_ground_grid(half_extent=9.0, step=1.0))
+
+        if field_path is not None:
+            if field_path.exists():
+                self.renderer.AddActor(make_field_actor(field_path))
+            else:
+                print(f"Warning: field mesh not found at {field_path}, skipping")
 
         world_axes = vtk.vtkAxesActor()
         world_axes.SetTotalLength(1.0, 1.0, 1.0)
@@ -201,6 +244,9 @@ def main():
                         help="Path to tags.json with ground-truth AprilTag poses")
     parser.add_argument("--tag-size", type=float, default=0.1651,
                         help="AprilTag edge length in meters")
+    parser.add_argument("--field", type=str, default="playing_field.obj",
+                        help="Path to the playing-field mesh (.obj, .stl, or .ply). "
+                             "Pre-convert playing_field.step once and commit it.")
     args = parser.parse_args()
 
     tags_path = Path(args.tags)
@@ -214,7 +260,8 @@ def main():
 
     localizer = CameraLocalizer(tag_size=args.tag_size, tags_path=str(tags_path))
 
-    viz = LocalizerVisualizer(localizer, tag_world_poses, args.tag_size)
+    viz = LocalizerVisualizer(localizer, tag_world_poses, args.tag_size,
+                              field_path=Path(args.field))
     viz.run()
     return 0
 
