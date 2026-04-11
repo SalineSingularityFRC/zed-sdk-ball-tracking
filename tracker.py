@@ -4,88 +4,6 @@ from scipy.optimize import linear_sum_assignment
 from models import Track
 from zed_utils import sl
 
-class WorldCoordinateSystem:
-    """Manages the camera-to-world transformation using AprilTags."""
-    def __init__(self, tag_size=0.165):
-        self.tag_size = tag_size
-        self.camera_mtx = None
-        self.dist_coeffs = np.zeros((4, 1))
-        # Default to no transformation (camera == world)
-        self.R = np.eye(3)
-        self.t = np.zeros((3, 1))
-        
-        # AprilTag Setup (using OpenCV ArUco with AprilTag 36h11 dictionary)
-        self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36h11)
-        self.aruco_params = cv2.aruco.DetectorParameters()
-        self.detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
-
-        self.world_plane_z = 0.5 # 0.5 meters above the tag
-
-    def update_pose(self, frame, zed_intrinsics):
-        if zed_intrinsics is None:
-            return frame
-
-        self.camera_mtx = np.array([
-            [zed_intrinsics['fx'], 0, zed_intrinsics['cx']],
-            [0, zed_intrinsics['fy'], zed_intrinsics['cy']],
-            [0, 0, 1]
-        ])
-
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-        corners, ids, rejected = self.detector.detectMarkers(gray)
-            
-        vis = frame.copy()
-        if ids is not None and len(ids) > 0:
-            cv2.aruco.drawDetectedMarkers(vis, corners, ids)
-            # Find the first tag to act as the world origin
-            obj_points = np.array([
-                [-self.tag_size/2, self.tag_size/2, 0],
-                [self.tag_size/2, self.tag_size/2, 0],
-                [self.tag_size/2, -self.tag_size/2, 0],
-                [-self.tag_size/2, -self.tag_size/2, 0]
-            ])
-            success, rvec, tvec = cv2.solvePnP(obj_points, corners[0][0], self.camera_mtx, self.dist_coeffs)
-            if success:
-                cv2.drawFrameAxes(vis, self.camera_mtx, self.dist_coeffs, rvec, tvec, self.tag_size)
-                self.R, _ = cv2.Rodrigues(rvec)
-                self.t = tvec
-                
-                # Draw the 0.5m plane visually on frame
-                pts_in_world = np.array([
-                    [-1.0, 1.0, self.world_plane_z],
-                    [1.0, 1.0, self.world_plane_z],
-                    [1.0, -1.0, self.world_plane_z],
-                    [-1.0, -1.0, self.world_plane_z]
-                ])
-                pts_in_cam = (self.R @ pts_in_world.T + self.t).T
-                img_pts, _ = cv2.projectPoints(pts_in_cam, np.zeros((3,1)), np.zeros((3,1)), self.camera_mtx, self.dist_coeffs)
-                img_pts = np.int32(img_pts).reshape(-1, 2)
-                cv2.polylines(vis, [img_pts], True, (255, 0, 255), 2)
-                cv2.putText(vis, "Target Plane (0.5m)", tuple(img_pts[0]), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 255), 2)
-                
-        return vis
-
-    def cam_to_world(self, pt_cam):
-        if pt_cam is None: return None
-        pt_w = self.R.T @ (np.array(pt_cam).reshape(3,1) - self.t)
-        return pt_w.flatten().tolist()
-        
-    def check_plane_intersection(self, pt_world_prev, pt_world_new):
-        if pt_world_prev is None or pt_world_new is None:
-            return None
-        z1 = pt_world_prev[2]
-        z2 = pt_world_new[2]
-        # Crosses from above plane (z > 0.5) to below plane (z < 0.5)
-        # Note: in OpenCV coordinate system, Z might point differently depending on solvePnP, 
-        # usually Z is into the tag. If world_plane_z is 0.5, we check crossing that threshold.
-        if (z1 >= self.world_plane_z and z2 <= self.world_plane_z) or (z1 <= self.world_plane_z and z2 >= self.world_plane_z):
-            # Interpolate
-            t = (self.world_plane_z - z1) / (z2 - z1 + 1e-6)
-            x_int = pt_world_prev[0] + t * (pt_world_new[0] - pt_world_prev[0])
-            y_int = pt_world_prev[1] + t * (pt_world_new[1] - pt_world_prev[1])
-            return (x_int, y_int, self.world_plane_z)
-        return None
 
 class BallTracker:
     """
@@ -94,10 +12,10 @@ class BallTracker:
     """
 
     def __init__(self, lower_hsv=None, upper_hsv=None,
-                 min_radius=5, max_radius=300,
-                 gate_radius=80, max_missed=15,
-                 min_track_length=3, min_circularity=0.70,
-                 fps=30.0, max_fit_error=15.0, min_displacement=20.0,
+                 min_radius=3, max_radius=300,
+                 gate_radius=350, max_missed=15,
+                 min_track_length=3, min_circularity=0.5,
+                 fps=60.0, max_fit_error=1000.0, min_displacement=100.0,
                  roi=None):
         self.lower_hsv = np.array(lower_hsv if lower_hsv else [0, 100, 100])
         self.upper_hsv = np.array(upper_hsv if upper_hsv else [20, 255, 255])
@@ -121,19 +39,17 @@ class BallTracker:
         self.zed_cam = None
         self._zed_runtime = None
         self._zed_pc_mat = None
-        self.world_system = WorldCoordinateSystem()
-        self.intersections = []
 
     def segment(self, frame):
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
         mask = cv2.inRange(hsv, self.lower_hsv, self.upper_hsv)
 
-        kernel_open = np.ones((5, 5), np.uint8)
-        kernel_close = np.ones((7, 7), np.uint8)
-        mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open, iterations=2)
+        kernel_open = np.ones((3, 3), np.uint8)
+        kernel_close = np.ones((3, 3), np.uint8)
+        # mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel_open, iterations=1)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel_close, iterations=2)
-        kernel_erode = np.ones((3, 3), np.uint8)
-        mask = cv2.erode(mask, kernel_erode, iterations=1)
+        # kernel_erode = np.ones((3, 3), np.uint8)
+        # mask = cv2.erode(mask, kernel_erode, iterations=1)
         return mask
 
     def _detect_circles(self, mask):
@@ -143,7 +59,7 @@ class BallTracker:
 
         for contour in contours:
             area = cv2.contourArea(contour)
-            if area < np.pi * (self.min_radius ** 2) * 0.8:
+            if area < np.pi * (self.min_radius ** 2) * 0.4:
                 continue
 
             perimeter = cv2.arcLength(contour, True)
@@ -154,14 +70,14 @@ class BallTracker:
             if circularity < self.min_circularity:
                 continue
 
-            if len(contour) >= 5:
-                (_, (minor_axis, major_axis), _) = cv2.fitEllipse(contour)
-                if minor_axis / (major_axis + 1e-6) < 0.65:
-                    continue
+            # if len(contour) >= 5:
+            #     (_, (minor_axis, major_axis), _) = cv2.fitEllipse(contour)
+            #     if minor_axis / (major_axis + 1e-6) < 0.65:
+            #         continue
 
             (cx, cy), radius = cv2.minEnclosingCircle(contour)
             circle_area = np.pi * radius * radius
-            if area / (circle_area + 1e-6) < 0.60:
+            if area / (circle_area + 1e-6) < 0.40:
                 continue
 
             if self.min_radius <= radius <= self.max_radius:
@@ -210,7 +126,8 @@ class BallTracker:
                             pos3d = self._get_point3d(dx, dy)
                     except Exception:
                         pos3d = None
-                    self.tracks[i].update(dx, dy, dr, self.frame_count, pos3d=pos3d)
+                    in_roi = self._point_in_roi(dx, dy)
+                    self.tracks[i].update(dx, dy, dr, self.frame_count, pos3d=pos3d, in_roi=in_roi)
                     assigned_det.add(j)
                     assigned_track.add(i)
 
@@ -229,7 +146,8 @@ class BallTracker:
                         pos3d = self._get_point3d(dx, dy)
                 except Exception:
                     pos3d = None
-                t = Track(dx, dy, dr, self.frame_count)
+                in_roi = self._point_in_roi(dx, dy)
+                t = Track(dx, dy, dr, self.frame_count, in_roi=in_roi)
                 # if we have a 3D point, overwrite the last appended None with the real 3D
                 if pos3d is not None:
                     # replace last position3d entry in trajectory
@@ -237,8 +155,7 @@ class BallTracker:
                         t.trajectory.positions3d[-1] = tuple(pos3d)
                 self.tracks.append(t)
 
-        # --- Prune dead tracks and spurious trajectories ---
-        # Capture ROI stats for tracks about to die (so we get the full trajectory)
+        # --- Prune dead and spurious tracks ---
         kept = []
         for t in self.tracks:
             if t.missed_frames > self.max_missed or self._is_spurious(t):
@@ -250,6 +167,12 @@ class BallTracker:
 
         # --- Visualize ---
         return self._visualize(frame, detections)
+
+    def _point_in_roi(self, x, y):
+        if self.roi is None:
+            return True
+        rx, ry, rw, rh = self.roi
+        return rx <= x <= rx + rw and ry <= y <= ry + rh
 
     def _track_hits_roi(self, track):
         """Check if any detection in the track falls inside the ROI."""
@@ -265,10 +188,19 @@ class BallTracker:
         """Record stats for a valid flight that passed through the ROI."""
         if track.id in self._roi_seen_ids:
             return
-        if not self._is_valid_flight(track):
+        traj = track.trajectory
+        len_ok = traj.fit_length >= self.min_track_length
+        disp_ok = track.total_displacement >= self.min_displacement
+        fit_ok = traj.fit_error <= self.max_fit_error
+        hit = self._track_hits_roi(track)
+        if not (len_ok and disp_ok and fit_ok and hit):
+        #     print(f"[capture-reject] #{track.id} len={traj.length} "
+        #           f"disp={track.total_displacement:.0f} fit_err={traj.fit_error:.1f} "
+        #           f"hits_roi={hit} "
+        #           f"[len_ok={len_ok} disp_ok={disp_ok} fit_ok={fit_ok}]")
             return
-        if not self._track_hits_roi(track):
-            return
+        # print(f"[capture-accept] #{track.id} len={traj.length} "
+        #       f"disp={track.total_displacement:.0f} fit_err={traj.fit_error:.1f}")
         self._roi_seen_ids.add(track.id)
         traj = track.trajectory
         airtime = (traj.last_frame - traj.first_frame) / self.fps
@@ -306,10 +238,12 @@ class BallTracker:
         })
 
     def _is_valid_flight(self, track):
-        """A track is worth visualizing only once it has enough points,
+        """A track is worth visualizing only once it has enough in-ROI points,
         meaningful displacement, and a reasonable ballistic fit."""
         traj = track.trajectory
-        if traj.length < self.min_track_length:
+        if traj.fit_length < self.min_track_length:
+            return False
+        if traj.coeffs_x is None or traj.coeffs_y is None:
             return False
         if track.total_displacement < self.min_displacement:
             return False
@@ -408,9 +342,6 @@ class BallTracker:
 
     def _visualize(self, frame, detections):
         vis = frame.copy()
-        
-        # Update World System and Draw AprilTags/Plane
-        vis = self.world_system.update_pose(vis, getattr(self, 'zed_intrinsics', None))
 
         # Current-frame raw detections in green
         for (cx, cy, r) in detections:
@@ -477,18 +408,6 @@ class BallTracker:
                 label2 = f"v={speed:.0f} err={traj.fit_error:.1f}"
                 cv2.putText(vis, label2, (cx - 40, cy - 8),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.38, color, 1)
-
-            # --- Check plane intersection ---
-            if hasattr(traj, 'positions3d') and len(traj.positions3d) >= 2:
-                p_cam_prev = traj.positions3d[-2]
-                p_cam_new = traj.positions3d[-1]
-                if p_cam_prev is not None and p_cam_new is not None:
-                    p_w_prev = self.world_system.cam_to_world(p_cam_prev)
-                    p_w_new = self.world_system.cam_to_world(p_cam_new)
-                    intersect = self.world_system.check_plane_intersection(p_w_prev, p_w_new)
-                    if intersect:
-                        self.intersections.append({'id': tr.id, 'point': intersect})
-                        print(f"BINGO! Ball ID #{tr.id} intercepted target plane at World XYZ: {intersect[0]:.2f}, {intersect[1]:.2f}, {intersect[2]:.2f}")
 
         # Draw ROI rectangle
         if self.roi is not None:

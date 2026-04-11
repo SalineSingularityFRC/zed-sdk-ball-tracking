@@ -22,7 +22,8 @@ def load_hsv_config():
         print(f"Warning: could not load HSV config: {e}")
     return None, None
 
-def run_calibration(video_path=None, image_path=None, camera_index=0):
+def run_calibration(video_path=None, image_path=None, svo_path=None,
+                    camera_index=0, calib_frame=0):
     def nothing(x):
         pass
 
@@ -33,12 +34,51 @@ def run_calibration(video_path=None, image_path=None, camera_index=0):
         if frame is None:
             print(f"Error: Could not load image '{image_path}'"); return
         cap = None
+    elif svo_path:
+        if not Path(svo_path).exists():
+            print(f"Error: SVO file '{svo_path}' not found"); return
+        cam = sl.Camera()
+        init = sl.InitParameters()
+        init.set_from_svo_file(str(svo_path))
+        init.svo_real_time_mode = False
+        init.camera_resolution = sl.RESOLUTION.HD720
+        init.camera_fps = 60
+        init.depth_mode = sl.DEPTH_MODE.NEURAL
+        init.coordinate_units = sl.UNIT.MILLIMETER
+        status = cam.open(init)
+        if status != sl.ERROR_CODE.SUCCESS:
+            print(f"Error: Could not open SVO file: {status}"); return
+        total = cam.get_svo_number_of_frames()
+        target = max(0, min(calib_frame, total - 1)) if total > 0 else max(0, calib_frame)
+        if target > 0:
+            cam.set_svo_position(target)
+        runtime = sl.RuntimeParameters()
+        mat = sl.Mat()
+        if cam.grab(runtime) != sl.ERROR_CODE.SUCCESS:
+            print(f"Error: Could not grab frame {target} from SVO"); cam.close(); return
+        cam.retrieve_image(mat, sl.VIEW.LEFT)
+        frame = mat.get_data()
+        cam.close()
+        if frame is None:
+            print("Error: retrieved empty frame from SVO"); return
+        if frame.ndim == 3 and frame.shape[2] == 4:
+            frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2RGB)
+        print(f"Calibrating on SVO frame {target} (of {total})")
+        cap = None
     elif video_path:
         if not Path(video_path).exists():
             print(f"Error: Video file '{video_path}' not found"); return
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             print(f"Error: Could not open video '{video_path}'"); return
+        if calib_frame > 0:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, float(calib_frame))
+            ret, frame = cap.read()
+            cap.release()
+            cap = None
+            if not ret or frame is None:
+                print(f"Error: Could not read frame {calib_frame} from video"); return
+            print(f"Calibrating on video frame {calib_frame}")
     else:
         # Prefer ZED camera when available
         use_zed = False
@@ -56,7 +96,7 @@ def run_calibration(video_path=None, image_path=None, camera_index=0):
                 frame = mat.get_data()
                 # Convert RGBA (ZED) to BGR for OpenCV if needed
                 if frame is not None and frame.ndim == 3 and frame.shape[2] == 4:
-                    frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+                    frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2RGB)
                 use_zed = True
                 cap = cam
             else:
@@ -99,7 +139,7 @@ def run_calibration(video_path=None, image_path=None, camera_index=0):
                     if new_frame is None:
                         break
                     if new_frame.ndim == 3 and new_frame.shape[2] == 4:
-                        new_frame = cv2.cvtColor(new_frame, cv2.COLOR_RGBA2BGR)
+                        new_frame = cv2.cvtColor(new_frame, cv2.COLOR_RGBA2RGB)
                     frame = new_frame
                 else:
                     ret, new_frame = cap.read()

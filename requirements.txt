@@ -6,3 +6,5 @@ vtk
 pupil-apriltags
 gtsam
 filterpy
+pyntcore
+scikit-learn

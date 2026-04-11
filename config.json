@@ -1,0 +1,24 @@
+{
+  "nt": {
+    "server": "10.0.0.2",
+    "table": "/SmartDashboard",
+    "keys": {
+      "pose_x": "/SmartDashboard/Robot/PoseX",
+      "pose_y": "/SmartDashboard/Robot/PoseY",
+      "pose_theta": "/SmartDashboard/Robot/PoseTheta",
+      "vel_x": "/SmartDashboard/Robot/VelX",
+      "vel_y": "/SmartDashboard/Robot/VelY",
+      "omega": "/SmartDashboard/Robot/Omega",
+      "turret_angle": "/SmartDashboard/Turret/Angle"
+    }
+  },
+  "turret": {
+    "offset_x": 0.0,
+    "offset_y": 0.0,
+    "offset_z": 0.5
+  },
+  "target": {},
+  "logging": {
+    "shots_csv": "shots.csv"
+  }
+}
