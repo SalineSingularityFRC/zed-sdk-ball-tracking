@@ -1,0 +1,7 @@
+numpy
+opencv-contrib-python
+scipy
+matplotlib
+vtk
+pupil-apriltags
+gtsam

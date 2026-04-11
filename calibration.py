@@ -1,7 +1,7 @@
 import cv2
 import numpy as np
 from pathlib import Path
-from zed_utils import sl, _has_zed
+from zed_utils import sl
 
 def load_hsv_config():
     config_path = Path('hsv_config.txt')
@@ -43,32 +43,26 @@ def run_calibration(video_path=None, image_path=None, camera_index=0):
         # Prefer ZED camera when available
         use_zed = False
         cap = None
-        if _has_zed:
-            try:
-                cam = sl.Camera()
-                init = sl.InitParameters()
-                # Use default init params; user can tune if needed
-                status = cam.open(init)
-                if status == sl.ERROR_CODE.SUCCESS:
-                    runtime = sl.RuntimeParameters()
-                    mat = sl.Mat()
-                    # small warm-up and single frame grab
-                    if cam.grab(runtime) == sl.ERROR_CODE.SUCCESS:
-                        cam.retrieve_image(mat, sl.VIEW.LEFT)
-                        frame = mat.get_data()
-                        # Convert RGBA (ZED) to BGR for OpenCV if needed
-                        if frame is not None and frame.ndim == 3 and frame.shape[2] == 4:
-                            frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
-                        use_zed = True
-                        cap = cam
-                    else:
-                        cam.close()
-                        cap = None
-                else:
-                    # failed to open ZED, fall back to cv2
-                    cap = None
-            except Exception:
-                cap = None
+        cam = sl.Camera()
+        init = sl.InitParameters()
+        # Use default init params; user can tune if needed
+        status = cam.open(init)
+        if status == sl.ERROR_CODE.SUCCESS:
+            runtime = sl.RuntimeParameters()
+            mat = sl.Mat()
+            # small warm-up and single frame grab
+            if cam.grab(runtime) == sl.ERROR_CODE.SUCCESS:
+                cam.retrieve_image(mat, sl.VIEW.LEFT)
+                frame = mat.get_data()
+                # Convert RGBA (ZED) to BGR for OpenCV if needed
+                if frame is not None and frame.ndim == 3 and frame.shape[2] == 4:
+                    frame = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+                use_zed = True
+                cap = cam
+            else:
+                cam.close()
+        else:
+            cam.close()
 
         if cap is None:
             cap = cv2.VideoCapture(camera_index)
@@ -96,7 +90,7 @@ def run_calibration(video_path=None, image_path=None, camera_index=0):
         while True:
             if cap is not None:
                 # If using ZED camera instance
-                if _has_zed and isinstance(cap, sl.Camera):
+                if isinstance(cap, sl.Camera):
                     if cap.grab(runtime) != sl.ERROR_CODE.SUCCESS:
                         break
                     mat = sl.Mat()
@@ -151,7 +145,7 @@ def run_calibration(video_path=None, image_path=None, camera_index=0):
         # Cleanup capture
         if cap is not None:
             try:
-                if _has_zed and isinstance(cap, sl.Camera):
+                if isinstance(cap, sl.Camera):
                     cap.close()
                 elif hasattr(cap, 'release'):
                     cap.release()

@@ -3,14 +3,9 @@ import sys
 from pathlib import Path
 import numpy as np
 import cv2
+import matplotlib.pyplot as plt
 
-try:
-    import matplotlib.pyplot as plt
-    _has_plt = True
-except ImportError:
-    _has_plt = False
-
-from zed_utils import sl, _has_zed
+from zed_utils import sl
 from tracker import BallTracker
 from calibration import run_calibration, load_hsv_config
 
@@ -48,97 +43,82 @@ def _show_roi_summary(first_frame, tracker):
                 (10, 58), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
 
     cv2.imshow('ROI Summary', summary)
-    
-    _has_plt = False
-    try:
-        import matplotlib.pyplot as plt
-        _has_plt = True
-    except ImportError:
-        pass
-    
+
     plotted_any = False
-    
-    if _has_plt:
+
+    if has_3d:
+        print("\nOpening 3D Matplotlib trajectory summary. Close the plot window to finish.")
+    else:
+        print("\nNo ZED depth data found. Showing semi-3D plot (X, Time, Y) instead.")
+
+    plt.ion() # Enable interactive mode
+    fig = plt.figure("3D Trajectories")
+    ax = fig.add_subplot(111, projection='3d')
+
+    for s in tracker.roi_stats:
+        pos3d = s.get('positions_3d')
+        pos2d = s.get('positions')
+        frames = s.get('frames')
+        if not pos2d: continue
+
+        b, g, r = s['color']
+        color_hex = '#%02x%02x%02x' % (r, g, b)
+
+        X, Y, Z = [], [], []
+        if has_3d and pos3d:
+            valid = [(p[0], p[1], p[2]) for p in pos3d if p is not None]
+            if valid:
+                X = [p[0] for p in valid]
+                Y = [p[1] for p in valid]
+                Z = [p[2] for p in valid]
+
+        if not X: # Fallback to 2D (X, Time, Y) if no 3D points in this track
+            X = [p[0] for p in pos2d]
+            Z = frames  # Use frame time as Z depth
+            Y = [p[1] for p in pos2d]
+
+        if not X: continue
+
+        ax.scatter(X, Z, Y, color=color_hex, label=f"ID #{s['id']}")
+        plotted_any = True
+
+        # Plot polynomial curve
+        cX, cY, cZ = s.get('coeffs_X'), s.get('coeffs_Y'), s.get('coeffs_Z')
+        cx, cy = s.get('coeffs_x'), s.get('coeffs_y')
+
+        if has_3d and cX is not None and cY is not None and cZ is not None and len(frames) >= 2:
+            t_vals = np.linspace(frames[0], frames[-1], 50)
+            curve_X = np.polyval(cX, t_vals)
+            curve_Y = np.polyval(cY, t_vals)
+            curve_Z = np.polyval(cZ, t_vals)
+            ax.plot(curve_X, curve_Z, curve_Y, color=color_hex)
+        elif not has_3d and cx is not None and cy is not None and len(frames) >= 2:
+            # 2D fallback poly
+            t_vals = np.linspace(frames[0], frames[-1], 50)
+            curve_X = np.polyval(cx, t_vals)
+            curve_Y = np.polyval(cy, t_vals)
+            curve_Z = t_vals
+            ax.plot(curve_X, curve_Z, curve_Y, color=color_hex)
+
+    if plotted_any:
         if has_3d:
-            print("\nOpening 3D Matplotlib trajectory summary. Close the plot window to finish.")
+            ax.set_xlabel('X (m) [Right]')
+            ax.set_ylabel('Z (m) [Forward]')
+            ax.set_zlabel('Y (m) [Down]')
         else:
-            print("\nNo ZED depth data found. Showing semi-3D plot (X, Time, Y) instead.")
-            
-        plt.ion() # Enable interactive mode
-        fig = plt.figure("3D Trajectories")
-        ax = fig.add_subplot(111, projection='3d')
-        
-        for s in tracker.roi_stats:
-            pos3d = s.get('positions_3d')
-            pos2d = s.get('positions')
-            frames = s.get('frames')
-            if not pos2d: continue
-            
-            b, g, r = s['color']
-            color_hex = '#%02x%02x%02x' % (r, g, b)
-            
-            X, Y, Z = [], [], []
-            if has_3d and pos3d:
-                valid = [(p[0], p[1], p[2]) for p in pos3d if p is not None]
-                if valid:
-                    X = [p[0] for p in valid]
-                    Y = [p[1] for p in valid]
-                    Z = [p[2] for p in valid]
-            
-            if not X: # Fallback to 2D (X, Time, Y) if no 3D points in this track
-                X = [p[0] for p in pos2d]
-                Z = frames  # Use frame time as Z depth
-                Y = [p[1] for p in pos2d]
+            ax.set_xlabel('X (px)')
+            ax.set_ylabel('Frame (Time)')
+            ax.set_zlabel('Y (px)')
 
-            if not X: continue
+        ax.invert_zaxis() # Invert visually so Y drops down
+        ax.set_box_aspect((1, 1, 1))
 
-            ax.scatter(X, Z, Y, color=color_hex, label=f"ID #{s['id']}")
-            plotted_any = True
-            
-            # Plot polynomial curve
-            cX, cY, cZ = s.get('coeffs_X'), s.get('coeffs_Y'), s.get('coeffs_Z')
-            cx, cy = s.get('coeffs_x'), s.get('coeffs_y')
-            
-            if has_3d and cX is not None and cY is not None and cZ is not None and len(frames) >= 2:
-                t_vals = np.linspace(frames[0], frames[-1], 50)
-                curve_X = np.polyval(cX, t_vals)
-                curve_Y = np.polyval(cY, t_vals)
-                curve_Z = np.polyval(cZ, t_vals)
-                ax.plot(curve_X, curve_Z, curve_Y, color=color_hex)
-            elif not has_3d and cx is not None and cy is not None and len(frames) >= 2:
-                # 2D fallback poly
-                t_vals = np.linspace(frames[0], frames[-1], 50)
-                curve_X = np.polyval(cx, t_vals)
-                curve_Y = np.polyval(cy, t_vals)
-                curve_Z = t_vals
-                ax.plot(curve_X, curve_Z, curve_Y, color=color_hex)
-                
-        if plotted_any:
-            if has_3d:
-                ax.set_xlabel('X (m) [Right]')
-                ax.set_ylabel('Z (m) [Forward]')
-                ax.set_zlabel('Y (m) [Down]')
-            else:
-                ax.set_xlabel('X (px)')
-                ax.set_ylabel('Frame (Time)')
-                ax.set_zlabel('Y (px)')
-                
-            ax.invert_zaxis() # Invert visually so Y drops down
-            
-            try:
-                ax.set_box_aspect((1, 1, 1))
-            except AttributeError:
-                pass
+        plt.legend()
+        plt.show(block=False)  # Show without blocking so OpenCV remains responsive
 
-            plt.legend()
-            plt.show(block=False)  # Show without blocking so OpenCV remains responsive
-
-    if not _has_plt:
-        print("\n'matplotlib' is missing! Run 'pip install matplotlib' to see graph visualizations.")
-        
     print("\nShowing ROI summary — press any key in the OpenCV window to close.")
-    
-    if _has_plt and plotted_any:
+
+    if plotted_any:
         # Event loop to keep both Matplotlib and OpenCV windows responsive simultaneously
         while True:
             # OpenCV waitKey waits briefly for a key press
@@ -146,14 +126,11 @@ def _show_roi_summary(first_frame, tracker):
             if key != -1:
                 break
             # Process Matplotlib events so the window stays active
-            try:
-                if plt.fignum_exists(fig.number):
-                    fig.canvas.flush_events()
-                else:
-                    # if they close the matplotlib window, exit
-                    break
-            except Exception:
-                pass
+            if plt.fignum_exists(fig.number):
+                fig.canvas.flush_events()
+            else:
+                # if they close the matplotlib window, exit
+                break
     else:
         cv2.waitKey(0)
 
@@ -178,24 +155,17 @@ def run_tracker(video_path=None, camera_index=0, start_from=0.0, no_roi=False):
         cap = cv2.VideoCapture(video_path)
     else:
         # Prefer ZED camera when available
-        if _has_zed:
-            try:
-                cam = sl.Camera()
-                init = sl.InitParameters()
-                init.depth_mode = sl.DEPTH_MODE.ULTRA # Use ULTRA depth mode
-                init.coordinate_units = sl.UNIT.MILLIMETER # Use millimeter units
-                status = cam.open(init)
-                if status == sl.ERROR_CODE.SUCCESS:
-                    runtime = sl.RuntimeParameters()
-                    cap = cam
-                    use_zed = True
-                else:
-                    cam.close()
-                    cap = None
-            except Exception:
-                cap = None
-
-        if cap is None:
+        cam = sl.Camera()
+        init = sl.InitParameters()
+        init.depth_mode = sl.DEPTH_MODE.ULTRA # Use ULTRA depth mode
+        init.coordinate_units = sl.UNIT.MILLIMETER # Use millimeter units
+        status = cam.open(init)
+        if status == sl.ERROR_CODE.SUCCESS:
+            runtime = sl.RuntimeParameters()
+            cap = cam
+            use_zed = True
+        else:
+            cam.close()
             cap = cv2.VideoCapture(camera_index)
 
     # Validate capture

@@ -2,7 +2,7 @@ import cv2
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 from models import Track
-from zed_utils import sl, _has_zed
+from zed_utils import sl
 
 class WorldCoordinateSystem:
     """Manages the camera-to-world transformation using AprilTags."""
@@ -15,35 +15,25 @@ class WorldCoordinateSystem:
         self.t = np.zeros((3, 1))
         
         # AprilTag Setup (using OpenCV ArUco with AprilTag 36h11 dictionary)
-        try:
-            self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36h11)
-            self.aruco_params = cv2.aruco.DetectorParameters()
-            if hasattr(cv2.aruco, 'ArucoDetector'):
-                self.detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
-            else:
-                self.detector = None
-        except Exception:
-            self.aruco_dict = None
-            self.detector = None
-            
+        self.aruco_dict = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_APRILTAG_36h11)
+        self.aruco_params = cv2.aruco.DetectorParameters()
+        self.detector = cv2.aruco.ArucoDetector(self.aruco_dict, self.aruco_params)
+
         self.world_plane_z = 0.5 # 0.5 meters above the tag
 
     def update_pose(self, frame, zed_intrinsics):
-        if zed_intrinsics is None or self.aruco_dict is None:
+        if zed_intrinsics is None:
             return frame
-            
+
         self.camera_mtx = np.array([
             [zed_intrinsics['fx'], 0, zed_intrinsics['cx']],
             [0, zed_intrinsics['fy'], zed_intrinsics['cy']],
             [0, 0, 1]
         ])
-        
+
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        
-        if self.detector is not None:
-            corners, ids, rejected = self.detector.detectMarkers(gray)
-        else:
-            corners, ids, rejected = cv2.aruco.detectMarkers(gray, self.aruco_dict, parameters=self.aruco_params)
+
+        corners, ids, rejected = self.detector.detectMarkers(gray)
             
         vis = frame.copy()
         if ids is not None and len(ids) > 0:
@@ -348,7 +338,7 @@ class BallTracker:
         cam: sl.Camera instance
         runtime: sl.RuntimeParameters used for grab()
         """
-        if not _has_zed or cam is None:
+        if cam is None:
             return
         try:
             self.zed_cam = cam
@@ -381,7 +371,7 @@ class BallTracker:
 
         Returns None if no valid depth available.
         """
-        if not _has_zed or self.zed_cam is None or getattr(self, '_zed_pc_mat', None) is None:
+        if self.zed_cam is None or getattr(self, '_zed_pc_mat', None) is None:
             return None
         try:
             # read point cloud at pixel (u,v)
